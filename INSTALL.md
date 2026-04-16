@@ -706,3 +706,100 @@ tmsh save sys config
 # 7. Crontab-Eintrag entfernen
 crontab -e   # tmctl-Zeile löschen
 ```
+
+
+---
+
+## Schritt 15 (Optional) — Grafana als alternatives Dashboard
+
+> Grafana bietet bessere Zeitreihen-Visualisierung und mächtiges Alerting als Kibana.  
+> Empfohlen als **Monitoring-Dashboard**, Kibana bleibt für Log-Analyse.
+
+### Installation
+
+```bash
+# Repository hinzufügen
+wget -q -O - https://apt.grafana.com/gpg.key | \
+  sudo gpg --dearmor -o /usr/share/keyrings/grafana.gpg
+echo "deb [signed-by=/usr/share/keyrings/grafana.gpg] https://apt.grafana.com stable main" | \
+  sudo tee /etc/apt/sources.list.d/grafana.list
+sudo apt-get update
+sudo apt-get install -y grafana
+sudo systemctl enable --now grafana-server
+```
+
+### Passwort setzen (beim ersten Login als admin/admin)
+
+```bash
+curl -s -X PUT http://admin:admin@<server-ip>:3000/api/user/password \
+  -H 'Content-Type: application/json' \
+  -d '{"oldPassword":"admin","newPassword":"<neues-passwort>","confirmNew":"<neues-passwort>"}'
+```
+
+### Elasticsearch Datenquellen hinzufügen
+
+```bash
+for INDEX in 'F5-DDoS-Events:f5-ddos-i-*' 'F5-DDoS-Stats:f5-stats-ddos-t-*'; do
+  NAME=$(echo $INDEX | cut -d: -f1)
+  IDX=$(echo $INDEX | cut -d: -f2)
+  curl -s -X POST http://admin:<passwort>@<server-ip>:3000/api/datasources \
+    -H 'Content-Type: application/json' \
+    -d "{
+      \"name\": \"$NAME\",
+      \"type\": \"elasticsearch\",
+      \"url\": \"https://localhost:9200\",
+      \"access\": \"proxy\",
+      \"basicAuth\": true,
+      \"basicAuthUser\": \"elastic\",
+      \"secureJsonData\": {\"basicAuthPassword\": \"<elastic-passwort>\"},
+      \"jsonData\": {
+        \"index\": \"$IDX\",
+        \"timeField\": \"@timestamp\",
+        \"esVersion\": \"8.0.0\",
+        \"tlsSkipVerify\": true
+      }
+    }"
+done
+```
+
+### Dashboards erstellen
+
+Die fertigen Dashboard-Definitionen als JSON via Grafana API importieren — siehe `grafana_dashboards/` Verzeichnis (falls vorhanden) oder manuell in der Grafana UI erstellen.
+
+**Empfohlene Panels für DDoS Overview:**
+- Stat: Total Events / Drop Events / Allow Events / Unique Vectors / Unique Source IPs
+- Time Series: Drop vs Allow Events Timeline
+- Bar Chart: Top 10 Attack Vectors
+- Table: Top Source IPs
+- Pie Charts: Action-Verteilung, Context Type
+
+**Empfohlene Panels für Vector Statistics:**
+- Stat: Avg Drop Rate / Avg Incoming Rate / Detection Threshold
+- Time Series: Overall Drop Rate / BA+BD Drop Rates / Incoming vs Drop
+- Time Series: Detection vs Mitigation Threshold
+- Table: Top Vectors by Drop Rate
+
+### Logrotate
+
+```
+/var/log/grafana/grafana.log {
+    daily
+    size 100M
+    compress
+    delaycompress
+    missingok
+    notifempty
+    copytruncate
+    rotate 7
+}
+```
+
+### Grafana vs Kibana — Wann was nutzen?
+
+| | Grafana | Kibana |
+|---|---|---|
+| DDoS Rate-Monitoring | ✅ Ideal | Gut |
+| Alerting | ✅ Mächtig | Eingeschränkt |
+| Log-Exploration | Eingeschränkt | ✅ Ideal |
+| Dashboard-Sharing | ✅ Einfach | Komplex |
+| **Empfehlung** | Live-Monitoring | Event-Analyse |
