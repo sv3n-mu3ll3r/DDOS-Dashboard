@@ -633,3 +633,76 @@ tmsh save sys config
 | GeoIP Filter | Kein target nötig | **`target => "geoip"` Pflicht** |
 | ECS Kompatibilität | v1 | v8 (muss für alte Templates deaktiviert werden) |
 | Ingest Pipeline | Optional | **Pflicht (node1-pipeline muss vor Logstash laden)** |
+
+---
+
+## DoS Statistics Collection
+
+### Option A — Crontab (immer verfügbar)
+
+Auf dem BIG-IP Crontab eintragen — `<ELK-SERVER-IP>` ersetzen:
+
+```bash
+* * * * * nb_of_tmms=$(tmsh show sys tmm-info | grep Sys::TMM | wc -l); \
+tmctl -c dos_stat -s context_name,vector_name,attack_detected,stats_rate,drops_rate, \
+int_drops_rate,ba_stats_rate,ba_drops_rate,bd_stats_rate,bd_drops_rate,detection, \
+mitigation_low,mitigation_high,detection_ba,mitigation_ba_low,mitigation_ba_high, \
+detection_bd,mitigation_bd_low,mitigation_bd_high | grep -v "context_name" | \
+sed '/^$/d' | sed "s/$/,$nb_of_tmms/g" | logger -n <ELK-SERVER-IP> --udp --port 5558
+```
+
+### Option B — EAV External Monitor (empfohlen, erfordert Lizenz)
+
+> **Voraussetzung:** Erfordert eine BIG-IP Lizenz die EAV (External Active Verification) unterstützt.  
+> In UDF Lab-Instanzen ist EAV typischerweise **nicht** lizenziert → Crontab (Option A) verwenden.
+
+Referenz: https://my.f5.com/manage/s/article/K71282813
+
+```bash
+# 1. Monitor Script erstellen
+cat > /config/monitors/dos_stats_collector << 'SCRIPT'
+#!/bin/bash
+PIDFILE="/var/run/dos_stats_collector.${NODE_IP}..${NODE_PORT}.pid"
+if [ -f "$PIDFILE" ]; then
+    OLD_PID=$(cat "$PIDFILE" 2>/dev/null)
+    [ -n "$OLD_PID" ] && kill -9 "$OLD_PID" 2>/dev/null
+    rm -f "$PIDFILE"
+fi
+echo $$ > "$PIDFILE"
+
+NB_TMMS=$(tmsh show sys tmm-info | grep 'Sys::TMM' | wc -l)
+tmctl -c dos_stat -s context_name,vector_name,attack_detected,stats_rate,drops_rate,\
+int_drops_rate,ba_stats_rate,ba_drops_rate,bd_stats_rate,bd_drops_rate,detection,\
+mitigation_low,mitigation_high,detection_ba,mitigation_ba_low,mitigation_ba_high,\
+detection_bd,mitigation_bd_low,mitigation_bd_high \
+  | grep -v 'context_name' | sed '/^$/d' | sed "s/$/$,${NB_TMMS}/g" \
+  | logger -n "${NODE_IP}" --udp --port "${NODE_PORT}"
+
+rm -f "$PIDFILE"
+echo 'up'
+exit 0
+SCRIPT
+chmod +x /config/monitors/dos_stats_collector
+
+# 2. Script in TMOS registrieren
+tmsh create sys file external-monitor dos_stats_collector \
+  source-path file:/config/monitors/dos_stats_collector
+
+# 3. External Monitor erstellen (alle 30 Sekunden)
+tmsh create ltm monitor external dos-stats-monitor \
+  interval 30 timeout 25 run dos_stats_collector
+
+# 4. Node für ELK Server erstellen
+tmsh create ltm node elk-server address <ELK-SERVER-IP>
+
+# 5. Pool mit Monitor erstellen
+tmsh create ltm pool dos-stats-pool \
+  monitor dos-stats-monitor \
+  members add { <ELK-SERVER-IP>:5558 }
+
+# 6. Konfiguration speichern
+tmsh save sys config
+
+# 7. Crontab-Eintrag entfernen
+crontab -e   # tmctl-Zeile löschen
+```
